@@ -1,0 +1,126 @@
+# ============================================================
+# CityViMD-Net 配置文件
+# 面向城市场景的视觉多模态目标检测
+# ============================================================
+
+# ---------- 数据集配置 ----------
+data:
+  # 数据集根目录
+  root: "data/"
+  train_dir: "train"
+  val_dir: "val"
+  test_dir: "test"
+  strict_modalities: true
+  
+  # 模态设置
+  modalities: ["rgb", "infrared", "depth"]
+  
+  # 图像尺寸 (height, width)
+  img_size: [640, 640]
+  
+  # 类别信息
+  num_classes: 12
+  class_names:
+    - person        # 0: 行人
+    - boat          # 1: 船
+    - animal        # 2: 动物
+    - seat          # 3: 座椅
+    - sign          # 4: 标识
+    - bicycle       # 5: 双轮车
+    - car           # 6: 四轮汽车
+    - ball          # 7: 球
+    - light         # 8: 灯
+    - garbage_can   # 9: 垃圾箱
+    - uav           # 10: 无人机
+    - tricycle      # 11: 三轮车
+
+# ---------- 模型配置 ----------
+model:
+  name: "CityViMD-Net"
+  
+  # 骨干网络
+  backbone:
+    type: "cspdarknet"
+    depth_multiple: 0.50
+    width_multiple: 0.50
+    pretrained: false
+    
+  # Neck 特征金字塔
+  neck:
+    type: "pan"
+    num_repeats: 1
+    
+  # 检测头
+  head:
+    type: "yolov8"
+    reg_max: 16  # DFL 回归范围
+    
+  # 输入通道
+  in_channels:
+    rgb: 3
+    infrared: 1
+    depth: 1
+
+# ---------- 训练配置 ----------
+train:
+  # 基础参数
+  epochs: 300
+  batch_size: 4
+  workers: 4
+  
+  # 优化器
+  optimizer:
+    type: "SGD"  # SGD / AdamW
+    lr: 0.01
+    momentum: 0.937
+    weight_decay: 0.0005
+    
+  # 学习率调度
+  scheduler:
+    type: "cosine"  # cosine / step
+    warmup_epochs: 3
+    lrf: 0.01  # 最终学习率因子
+    
+  # 损失权重
+  loss:
+    box: 7.5     # 定位损失权重
+    cls: 0.5     # 分类损失权重
+    dfl: 1.5     # DFL损失权重
+    
+  # 数据增强
+  augment:
+    hsv_h: 0.015      # 色调增强
+    hsv_s: 0.7        # 饱和度增强
+    hsv_v: 0.4        # 明度增强
+    fliplr: 0.5       # 左右翻转概率
+    color_prob: 0.5   # RGB颜色增强概率
+    ir_gamma_prob: 0.3
+
+  grad_clip: 10.0
+    
+  # 验证设置
+  val_interval: 10  # 每隔多少轮验证一次
+  save_interval: 10  # 每隔多少轮保存一次
+  
+  # 早停
+  early_stopping:
+    patience: 50
+    monitor: "map50_95"
+
+# ---------- 测试配置 ----------
+test:
+  batch_size: 4
+  conf_thres: 0.001
+  iou_thres: 0.7
+  max_det: 100
+  half: false
+
+# ---------- 设备配置 ----------
+device:
+  cuda: true
+  gpu_id: 0
+  seed: 42
+
+# ---------- 路径配置 ----------
+paths:
+  output_dir: "runs/train"
