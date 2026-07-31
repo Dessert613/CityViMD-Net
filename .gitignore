@@ -1,0 +1,21 @@
+# Dataset and experiment outputs
+data/
+runs/
+tmp/
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+
+# IDE and OS metadata
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Competition materials kept locally
+*.pdf
