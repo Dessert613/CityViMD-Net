@@ -1,0 +1,27 @@
+# CityViMD-Net 依赖包
+# 面向城市场景的视觉多模态目标检测
+
+# 深度学习框架
+torch>=1.12.0
+torchvision>=0.13.0
+
+# 数据处理
+numpy>=1.21.0
+opencv-python>=4.5.0
+Pillow>=9.0.0
+
+# 配置与日志
+pyyaml>=6.0
+tensorboard>=2.10.0
+tqdm>=4.64.0
+
+# 可视化
+matplotlib>=3.5.0
+
+# 工具
+scipy>=1.9.0
+scikit-learn>=1.0.0
+
+# 可选：加速
+# apex  # 需手动安装
+# thop  # 计算参数量和FLOPs
