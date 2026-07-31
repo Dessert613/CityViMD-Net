@@ -3,6 +3,8 @@
 > **面向城市场景的视觉多模态目标检测**
 > 
 > City Visual Multimodal Detection Network
+>
+> 参赛队伍：**都是同龄人队**
 
 ## 📖 项目简介
 
