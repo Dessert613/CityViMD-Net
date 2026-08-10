@@ -81,7 +81,7 @@ CityViMD/
 
 ## 🚀 快速开始
 
-完整的训练、结果校验和打包步骤见 [`SUBMISSION.md`](SUBMISSION.md)。
+最短上手路径见 [`SUBMISSION.md`](SUBMISSION.md)。
 
 ### 1. 环境安装
 
@@ -91,27 +91,6 @@ pip install -r requirements.txt
 
 ### 2. 数据准备
 
-将数据集按以下结构组织：
-
-```
-data/
-├── train/
-│   ├── rgb/          # 可见光图像 (PNG)
-│   ├── infrared/     # 红外图像 (PNG)
-│   ├── depth/        # 深度图像 (PNG, 16位)
-│   └── labels/       # YOLO格式标签 (TXT)
-├── val/
-│   └── ...
-└── test/
-    └── ...
-```
-
-标签格式（每行一个目标）：
-```
-class_id cx cy w h
-```
-坐标均为归一化值（0~1）。
-
 三种模态必须文件名一致、原始高宽一致。训练前建议执行：
 
 ```bash
@@ -119,6 +98,14 @@ python tools/validate_dataset.py --split train
 python tools/validate_dataset.py --split val
 python tools/smoke_test.py
 ```
+
+一键执行：
+
+```bash
+python tools/validate_pipeline.py --split train --train --test --package --tta
+```
+
+训练过程中，`runs/train/weights/` 保存最终权重，`runs/train/checkpoints/` 保存按轮快照。
 
 ### 3. 训练
 
@@ -138,10 +125,9 @@ python train.py --config configs/default.yaml \
     --resume runs/train/weights/last.pt
 ```
 
-### 4. 测试/推理
+### 4. 测试与校验
 
 ```bash
-# 生成预测结果
 python test.py --config configs/default.yaml \
     --weights runs/train/weights/best.pt \
     --input data/test \
@@ -149,20 +135,13 @@ python test.py --config configs/default.yaml \
     --conf-thres 0.001 \
     --iou-thres 0.7 \
     --zip
-```
 
-提交前校验：
-
-```bash
 python tools/validate_predictions.py \
     --images data/test/rgb \
     --predictions runs/test/predictions
 ```
 
-输出格式（每张图一个 TXT 文件）：
-```
-class_id cx cy w h confidence
-```
+输出格式：`class_id cx cy w h confidence`
 
 ## 📊 数据集说明
 
@@ -202,8 +181,7 @@ class_id cx cy w h confidence
 - **其他指标**：mAP@50、mAP@75
 
 ### 调参记录
-共 10 次提交。最高
-分数为 **59.877**，时间为 **2026-07-31 15:28:54**。
+共 11 次提交。最高分为 **64.233**，时间为 **2026-08-10 00:00:00**。
 
 ## ⚙️ 配置说明
 
@@ -226,4 +204,3 @@ class_id cx cy w h confidence
 - 模型集成（投票法、平均法等）
 - 使用外部训练数据
 - 将测试集用于训练
-

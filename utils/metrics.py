@@ -216,6 +216,36 @@ def compute_map(predictions, targets, num_classes=12, iou_thresholds=None):
     return results
 
 
+def format_metric_summary(results):
+    """Format key metrics for human-readable logging."""
+    return (
+        f"mAP@50: {results.get('map50', 0.0):.4f} | "
+        f"mAP@75: {results.get('map75', 0.0):.4f} | "
+        f"mAP@50-95: {results.get('map50_95', 0.0):.4f}"
+    )
+
+
+def format_class_summary(results, class_names=None, topk=3):
+    """Format the strongest per-class AP@50 entries."""
+    ap_values = results.get('ap_per_class_50', [])
+    if not ap_values:
+        return "per-class AP@50: unavailable"
+
+    if class_names is None:
+        class_names = [f"class_{idx}" for idx in range(len(ap_values))]
+
+    ranked = sorted(
+        enumerate(ap_values),
+        key=lambda item: item[1],
+        reverse=True,
+    )[:max(topk, 1)]
+    parts = [
+        f"{class_names[idx]}={score:.4f}"
+        for idx, score in ranked
+    ]
+    return "per-class AP@50 (top): " + ", ".join(parts)
+
+
 class MetricsCalculator:
     """指标计算器"""
     
@@ -322,26 +352,3 @@ def evaluate(model, dataloader, device, conf_thres=0.001, iou_thres=0.7,
     
     results = metrics.compute()
     return results
-
-
-if __name__ == '__main__':
-    # 测试指标计算
-    print("Metrics module loaded successfully")
-    
-    # 数据
-    preds = [
-        np.array([[10, 10, 50, 50, 0.9, 0],
-                  [100, 100, 150, 150, 0.8, 1]]),
-        np.array([[20, 20, 60, 60, 0.7, 0]]),
-    ]
-    
-    gts = [
-        np.array([[0, 12, 12, 52, 52],
-                  [1, 102, 102, 152, 152]]),
-        np.array([[0, 22, 22, 62, 62]]),
-    ]
-    
-    results = compute_map(preds, gts, num_classes=12)
-    print(f"mAP@50: {results['map50']:.4f}")
-    print(f"mAP@75: {results['map75']:.4f}")
-    print(f"mAP@50-95: {results['map50_95']:.4f}")

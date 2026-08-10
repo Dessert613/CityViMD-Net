@@ -7,7 +7,6 @@ import sys
 import argparse
 import time
 import yaml
-import json
 import numpy as np
 import torch
 import torch.nn as nn
@@ -21,7 +20,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from models.model import build_model
 from datasets.multimodal_dataset import build_dataloader, load_config
 from utils.loss import build_loss
-from utils.metrics import evaluate
+from utils.metrics import evaluate, format_metric_summary, format_class_summary
+from utils.ema import ModelEMA
 
 
 def parse_args():
@@ -40,6 +40,14 @@ def parse_args():
                         help='设备（覆盖配置文件）')
     parser.add_argument('--output-dir', type=str, default=None,
                         help='输出目录（覆盖配置文件）')
+    parser.add_argument('--val-interval', type=int, default=None,
+                        help='验证间隔（覆盖配置文件）')
+    parser.add_argument('--save-interval', type=int, default=None,
+                        help='保存间隔（覆盖配置文件）')
+    parser.add_argument('--patience', type=int, default=None,
+                        help='早停耐心值（覆盖配置文件）')
+    parser.add_argument('--no-ema', action='store_true',
+                        help='关闭 EMA')
     return parser.parse_args()
 
 
@@ -126,7 +134,7 @@ def build_scheduler(optimizer, cfg, steps_per_epoch):
 
 
 def train_one_epoch(model, dataloader, optimizer, loss_fn, device, epoch, 
-                    img_size=(640, 640)):
+                    img_size=(640, 640), scaler=None, use_amp=False):
     """训练一个 epoch"""
     model.train()
     
@@ -135,6 +143,7 @@ def train_one_epoch(model, dataloader, optimizer, loss_fn, device, epoch,
     loss_cls_sum = 0
     loss_dfl_sum = 0
     num_batches = 0
+    train_start = time.time()
     
     pbar = tqdm(dataloader, desc=f'Epoch {epoch}', ncols=100)
     
@@ -143,21 +152,31 @@ def train_one_epoch(model, dataloader, optimizer, loss_fn, device, epoch,
         labels = batch['labels'].to(device)
         
         # 前向传播
-        predictions, mod_weights = model(images)
-        
-        # 计算损失
-        loss, loss_items = loss_fn(predictions, labels, img_size)
-        
+        with torch.cuda.amp.autocast(enabled=use_amp):
+            predictions, mod_weights = model(images)
+
+            # 计算损失
+            loss, loss_items = loss_fn(predictions, labels, img_size)
+
         # 反向传播
         optimizer.zero_grad()
-        loss.backward()
+        if scaler is not None and use_amp:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
         max_norm = (
             loss_fn.cfg.get('train', {}).get('grad_clip', 0.0)
             if hasattr(loss_fn, 'cfg') else 0.0
         )
         if max_norm > 0:
+            if scaler is not None and use_amp:
+                scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
-        optimizer.step()
+        if scaler is not None and use_amp:
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
         
         # 统计
         total_loss += loss_items['loss']
@@ -178,12 +197,14 @@ def train_one_epoch(model, dataloader, optimizer, loss_fn, device, epoch,
     avg_box = loss_box_sum / num_batches
     avg_cls = loss_cls_sum / num_batches
     avg_dfl = loss_dfl_sum / num_batches
-    
+    epoch_time = time.time() - train_start
+
     return {
         'loss': avg_loss,
         'loss_box': avg_box,
         'loss_cls': avg_cls,
         'loss_dfl': avg_dfl,
+        'epoch_time': epoch_time,
     }
 
 
@@ -191,7 +212,7 @@ def validate(model, dataloader, loss_fn, device, img_size=(640, 640),
              num_classes=12):
     """验证"""
     model.eval()
-    
+    validate_start = time.time()
     # 计算验证集 mAP
     results = evaluate(
         model, dataloader, device,
@@ -201,20 +222,24 @@ def validate(model, dataloader, loss_fn, device, img_size=(640, 640),
         max_det=100,
         img_size=img_size
     )
+    results['val_time'] = time.time() - validate_start
     
     return results
 
 
 def save_checkpoint(model, optimizer, scheduler, epoch, best_map, is_best,
-                    save_dir, filename='last.pt'):
+                    save_dir, filename='last.pt', ema_state_dict=None,
+                    model_state_dict=None):
     """保存检查点"""
     checkpoint = {
         'epoch': epoch,
-        'model_state_dict': model.state_dict(),
+        'model_state_dict': model_state_dict or model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
         'best_map': best_map,
     }
+    if ema_state_dict is not None:
+        checkpoint['ema_state_dict'] = ema_state_dict
     
     save_path = os.path.join(save_dir, filename)
     torch.save(checkpoint, save_path)
@@ -241,6 +266,15 @@ def main():
         cfg['device']['gpu_id'] = int(args.device)
     if args.output_dir is not None:
         cfg['paths']['output_dir'] = args.output_dir
+    if args.val_interval is not None:
+        cfg['train']['val_interval'] = args.val_interval
+    if args.save_interval is not None:
+        cfg['train']['save_interval'] = args.save_interval
+    if args.no_ema:
+        cfg['train']['use_ema'] = False
+    if args.patience is not None:
+        cfg['train'].setdefault('early_stopping', {})
+        cfg['train']['early_stopping']['patience'] = args.patience
     
     # 设置设备
     device = torch.device(f'cuda:{cfg["device"]["gpu_id"]}' 
@@ -258,6 +292,12 @@ def main():
     os.makedirs(weights_dir, exist_ok=True)
     log_dir = os.path.join(output_dir, 'logs')
     os.makedirs(log_dir, exist_ok=True)
+    checkpoints_dir = os.path.join(output_dir, 'checkpoints')
+    os.makedirs(checkpoints_dir, exist_ok=True)
+    print(f"Output dir: {output_dir}")
+    print(f"Weights dir: {weights_dir}")
+    print(f"Checkpoints dir: {checkpoints_dir}")
+    print(f"Logs dir: {log_dir}")
     
     # 保存配置
     with open(os.path.join(output_dir, 'config.yaml'), 'w', encoding='utf-8') as f:
@@ -277,6 +317,9 @@ def main():
     print("Building model...")
     model = build_model(cfg)
     model = model.to(device)
+    use_amp = bool(cfg.get('train', {}).get('amp', device.type == 'cuda'))
+    ema_decay = float(cfg.get('train', {}).get('ema_decay', 0.9999))
+    model_ema = ModelEMA(model, decay=ema_decay, device=device) if cfg['train'].get('use_ema', True) else None
     
     # 统计参数量
     total_params = sum(p.numel() for p in model.parameters())
@@ -286,6 +329,7 @@ def main():
     
     # 构建损失函数
     loss_fn = build_loss(model, cfg)
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
     
     # 构建优化器
     optimizer = build_optimizer(model, cfg)
@@ -306,6 +350,8 @@ def main():
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             if 'scheduler_state_dict' in checkpoint:
                 scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            if model_ema is not None and 'ema_state_dict' in checkpoint:
+                model_ema.load_state_dict(checkpoint['ema_state_dict'])
             start_epoch = checkpoint['epoch'] + 1
             best_map = checkpoint.get('best_map', 0.0)
             print(f"Resumed from epoch {start_epoch}, best mAP: {best_map:.4f}")
@@ -319,6 +365,11 @@ def main():
     
     print(f"\nStarting training for {epochs} epochs...")
     print(f"{'='*60}")
+    print(
+        f"Validation every {val_interval} epochs, "
+        f"checkpoint save every {save_interval} epochs, "
+        f"EMA={'on' if model_ema is not None else 'off'}"
+    )
     
     img_size = tuple(cfg['data']['img_size'])
     num_classes = cfg['data']['num_classes']
@@ -326,21 +377,38 @@ def main():
     epochs_without_improvement = 0
     
     for epoch in range(start_epoch, epochs):
+        epoch_start = time.time()
         # 训练
         train_metrics = train_one_epoch(
-            model, train_loader, optimizer, loss_fn, device, epoch, img_size
+            model, train_loader, optimizer, loss_fn, device, epoch, img_size,
+            scaler=scaler, use_amp=use_amp
         )
+        if model_ema is not None:
+            model_ema.update(model)
         
         # 更新学习率
         scheduler.step()
         current_lr = optimizer.param_groups[0]['lr']
         
         # 记录训练指标
-        writer.add_scalar('Train/loss', train_metrics['loss'], epoch)
-        writer.add_scalar('Train/loss_box', train_metrics['loss_box'], epoch)
-        writer.add_scalar('Train/loss_cls', train_metrics['loss_cls'], epoch)
-        writer.add_scalar('Train/loss_dfl', train_metrics['loss_dfl'], epoch)
-        writer.add_scalar('Train/lr', current_lr, epoch)
+        writer.add_scalar('train/loss', train_metrics['loss'], epoch)
+        writer.add_scalar('train/box', train_metrics['loss_box'], epoch)
+        writer.add_scalar('train/cls', train_metrics['loss_cls'], epoch)
+        writer.add_scalar('train/dfl', train_metrics['loss_dfl'], epoch)
+        writer.add_scalar('train/lr', current_lr, epoch)
+        writer.add_scalar('train/epoch_time', train_metrics['epoch_time'], epoch)
+        writer.add_scalar('train/samples_per_sec', len(train_loader.dataset) / max(train_metrics['epoch_time'], 1e-6), epoch)
+        writer.add_text(
+            'train/summary',
+            (
+                f"loss={train_metrics['loss']:.4f}, "
+                f"box={train_metrics['loss_box']:.4f}, "
+                f"cls={train_metrics['loss_cls']:.4f}, "
+                f"dfl={train_metrics['loss_dfl']:.4f}, "
+                f"epoch_time={train_metrics['epoch_time']:.2f}s"
+            ),
+            epoch,
+        )
         
         print(f"\nEpoch {epoch}/{epochs} - "
               f"loss: {train_metrics['loss']:.4f} - "
@@ -352,17 +420,31 @@ def main():
         # 验证
         if (epoch + 1) % val_interval == 0 or epoch == epochs - 1:
             print(f"\nValidating...")
+            prev_best_map = best_map
+            eval_model = model_ema.ema if model_ema is not None else model
             val_results = validate(
-                model, val_loader, loss_fn, device, img_size, num_classes
+                eval_model, val_loader, loss_fn, device, img_size, num_classes
             )
             
-            writer.add_scalar('Val/mAP50', val_results['map50'], epoch)
-            writer.add_scalar('Val/mAP75', val_results['map75'], epoch)
-            writer.add_scalar('Val/mAP50-95', val_results['map50_95'], epoch)
+            writer.add_scalar('val/map50', val_results['map50'], epoch)
+            writer.add_scalar('val/map75', val_results['map75'], epoch)
+            writer.add_scalar('val/map50_95', val_results['map50_95'], epoch)
+            writer.add_scalar('val/best_map50_95', best_map, epoch)
+            writer.add_scalar('val/val_time', val_results['val_time'], epoch)
+            writer.add_scalar('val/best_delta', val_results['map50_95'] - prev_best_map, epoch)
+            writer.add_text(
+                'val/summary',
+                f"{format_metric_summary(val_results)} | best_mAP50-95: {best_map:.4f}",
+                epoch,
+            )
+            writer.add_text(
+                'val/class_summary',
+                format_class_summary(val_results, cfg['data'].get('class_names')),
+                epoch,
+            )
             
-            print(f"Val mAP@50: {val_results['map50']:.4f} - "
-                  f"mAP@75: {val_results['map75']:.4f} - "
-                  f"mAP@50-95: {val_results['map50_95']:.4f}")
+            print(f"Val summary: {format_metric_summary(val_results)}")
+            print(format_class_summary(val_results, cfg['data'].get('class_names')))
             
             # 保存最佳模型
             is_best = val_results['map50_95'] > best_map
@@ -372,14 +454,35 @@ def main():
                 print(f"New best mAP@50-95: {best_map:.4f}")
             else:
                 epochs_without_improvement += val_interval
+                print(
+                    f"No improvement for {epochs_without_improvement} epochs "
+                    f"(patience={patience})"
+                )
+
+            writer.add_scalar('val/improvement', val_results['map50_95'] - prev_best_map, epoch)
             
-            save_checkpoint(model, optimizer, scheduler, epoch, best_map, is_best,
-                          weights_dir, filename='last.pt')
+            save_checkpoint(
+                model, optimizer, scheduler, epoch, best_map, is_best,
+                weights_dir, filename='last.pt',
+                ema_state_dict=model_ema.state_dict() if model_ema is not None else None
+            )
+            if is_best and model_ema is not None:
+                save_checkpoint(
+                    model, optimizer, scheduler, epoch, best_map, True,
+                    weights_dir, filename='best.pt',
+                    ema_state_dict=model_ema.state_dict(),
+                    model_state_dict=model_ema.state_dict(),
+                )
+            print(f"Checkpoint saved. best_map={best_map:.4f}, patience_counter={epochs_without_improvement}")
         
         # 定期保存
         elif (epoch + 1) % save_interval == 0:
-            save_checkpoint(model, optimizer, scheduler, epoch, best_map, False,
-                          weights_dir, filename=f'epoch_{epoch}.pt')
+            save_checkpoint(
+                model, optimizer, scheduler, epoch, best_map, False,
+                checkpoints_dir, filename=f'epoch_{epoch}.pt',
+                ema_state_dict=model_ema.state_dict() if model_ema is not None else None
+            )
+            print(f"Checkpoint saved: epoch_{epoch}.pt")
         
         print(f"{'='*60}")
 

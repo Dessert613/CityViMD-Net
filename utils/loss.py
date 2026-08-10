@@ -90,6 +90,8 @@ def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, eps=1e-7
 
 def aligned_ciou(box1, box2, eps=1e-7):
     """逐元素计算两组 xyxy 框的 CIoU，输入形状均为 [N, 4]。"""
+    if box1.numel() == 0 or box2.numel() == 0:
+        return torch.zeros((0,), device=box1.device, dtype=box1.dtype)
     inter_lt = torch.maximum(box1[:, :2], box2[:, :2])
     inter_rb = torch.minimum(box1[:, 2:], box2[:, 2:])
     inter_wh = (inter_rb - inter_lt).clamp(min=0)
@@ -109,6 +111,8 @@ def aligned_ciou(box1, box2, eps=1e-7):
     enclosing_rb = torch.maximum(box1[:, 2:], box2[:, 2:])
     enclosing_diag = ((enclosing_rb - enclosing_lt) ** 2).sum(dim=1) + eps
 
+    wh1 = wh1.clamp(min=eps)
+    wh2 = wh2.clamp(min=eps)
     v = (4 / math.pi ** 2) * (
         torch.atan(wh2[:, 0] / wh2[:, 1]) -
         torch.atan(wh1[:, 0] / wh1[:, 1])
@@ -241,16 +245,20 @@ class BboxLoss(nn.Module):
             loss_dfl: DFL 损失
         """
         # 只计算前景
-        weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
+        if fg_mask.sum() == 0:
+            zero = pred_bboxes.sum() * 0.0
+            return zero, zero
+
+        weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1).clamp(min=1e-6)
         
         # CIoU 损失
         iou = aligned_ciou(pred_bboxes[fg_mask], target_bboxes[fg_mask])
-        loss_iou = ((1.0 - iou).unsqueeze(-1) * weight).sum() / (weight.sum() + 1e-6)
+        loss_iou = ((1.0 - iou).unsqueeze(-1) * weight).sum() / weight.sum()
         
         # DFL 损失
         target_ltrb = self._bbox2dist(anchor_points, strides, target_bboxes)
         loss_dfl = self._df_loss(pred_dist[fg_mask], target_ltrb[fg_mask]) * weight
-        loss_dfl = loss_dfl.sum() / (weight.sum() + 1e-6)
+        loss_dfl = loss_dfl.sum() / weight.sum()
         
         return loss_iou, loss_dfl
     
@@ -265,8 +273,11 @@ class BboxLoss(nn.Module):
     
     def _df_loss(self, pred_dist, target):
         """Distribution Focal Loss"""
+        if pred_dist.numel() == 0:
+            return pred_dist.new_zeros((0, 1))
         # pred_dist: [N, 4*(reg_max+1)]
         # target: [N, 4]
+        target = target.clamp(min=0, max=self.reg_max - 1e-4)
         target_left = target.long()
         target_right = target_left + 1
         weight_right = target - target_left.float()
@@ -274,16 +285,17 @@ class BboxLoss(nn.Module):
         
         pred_dist = pred_dist.view(-1, 4, self.reg_max + 1)
         
-        loss = F.cross_entropy(
+        left_loss = F.cross_entropy(
             pred_dist.view(-1, self.reg_max + 1),
             target_left.view(-1),
             reduction='none'
-        ).view(-1, 4) * weight_left + \
-        F.cross_entropy(
+        ).view(-1, 4)
+        right_loss = F.cross_entropy(
             pred_dist.view(-1, self.reg_max + 1),
             target_right.view(-1).clamp(max=self.reg_max),
             reduction='none'
-        ).view(-1, 4) * weight_right
+        ).view(-1, 4)
+        loss = left_loss * weight_left + right_loss * weight_right
         
         return loss.mean(dim=-1, keepdim=True)
 
@@ -492,8 +504,3 @@ class v8DetectionLoss:
 def build_loss(model, cfg):
     """构建损失函数"""
     return v8DetectionLoss(model, cfg)
-
-
-if __name__ == '__main__':
-    # 测试损失函数
-    print("Loss module loaded successfully")
