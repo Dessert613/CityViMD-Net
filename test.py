@@ -7,7 +7,6 @@ import os
 import sys
 import argparse
 import yaml
-import glob
 import numpy as np
 import cv2
 import torch
@@ -40,6 +39,8 @@ def parse_args():
                         help='GPU ID')
     parser.add_argument('--zip', action='store_true',
                         help='打包结果为 zip')
+    parser.add_argument('--tta', action='store_true',
+                        help='启用简单翻转 TTA')
     return parser.parse_args()
 
 
@@ -128,7 +129,7 @@ def preprocess(images, img_size):
     return input_tensor, scale_info
 
 
-def postprocess(detections, scale_info, img_size):
+def postprocess(detections, scale_info):
     """后处理：将检测框映射回原图坐标"""
     if len(detections) == 0:
         return detections
@@ -163,6 +164,55 @@ def xyxy_to_yolo(boxes, img_w, img_h):
     h = (boxes[:, 3] - boxes[:, 1]) / img_h
     
     return np.stack([cx, cy, w, h], axis=1)
+
+
+def nms_per_class(detections, iou_thres, max_det):
+    if len(detections) == 0:
+        return detections
+    boxes = detections[:, :4]
+    scores = detections[:, 4]
+    classes = detections[:, 5].astype(int)
+    keep_all = []
+    for cls_id in np.unique(classes):
+        cls_idx = np.where(classes == cls_id)[0]
+        cls_boxes = boxes[cls_idx]
+        cls_scores = scores[cls_idx]
+        order = np.argsort(-cls_scores)
+        while len(order) > 0:
+            current = order[0]
+            keep_all.append(cls_idx[current])
+            if len(order) == 1:
+                break
+            rest = order[1:]
+            ious = _box_iou_np(cls_boxes[current], cls_boxes[rest])
+            order = rest[ious <= iou_thres]
+    keep_all = np.array(keep_all, dtype=int)
+    keep_all = keep_all[np.argsort(-scores[keep_all])]
+    return detections[keep_all[:max_det]]
+
+
+def _box_iou_np(box, boxes):
+    if len(boxes) == 0:
+        return np.zeros((0,), dtype=np.float32)
+    x1 = np.maximum(box[0], boxes[:, 0])
+    y1 = np.maximum(box[1], boxes[:, 1])
+    x2 = np.minimum(box[2], boxes[:, 2])
+    y2 = np.minimum(box[3], boxes[:, 3])
+    inter = np.clip(x2 - x1, 0, None) * np.clip(y2 - y1, 0, None)
+    area1 = np.clip(box[2] - box[0], 0, None) * np.clip(box[3] - box[1], 0, None)
+    area2 = np.clip(boxes[:, 2] - boxes[:, 0], 0, None) * np.clip(boxes[:, 3] - boxes[:, 1], 0, None)
+    return inter / np.maximum(area1 + area2 - inter, 1e-7)
+
+
+def flip_boxes_horizontally(detections, width):
+    if len(detections) == 0:
+        return detections
+    flipped = detections.copy()
+    x1 = detections[:, 0].copy()
+    x2 = detections[:, 2].copy()
+    flipped[:, 0] = width - x2
+    flipped[:, 2] = width - x1
+    return flipped
 
 
 def main():
@@ -240,11 +290,22 @@ def main():
                 iou_thres=args.iou_thres,
                 max_det=args.max_det
             )
-        
-        detections = results[0].cpu().numpy()
-        
+            detections = results[0].cpu().numpy()
+            if args.tta:
+                flipped_tensor = torch.flip(input_tensor, dims=[3])
+                tta_results = model.predict(
+                    flipped_tensor,
+                    conf_thres=args.conf_thres,
+                    iou_thres=args.iou_thres,
+                    max_det=args.max_det
+                )
+                tta_det = tta_results[0].cpu().numpy()
+                tta_det[:, :4] = flip_boxes_horizontally(tta_det[:, :4], img_size[1])
+                detections = np.concatenate([detections, tta_det], axis=0) if len(tta_det) else detections
+                detections = nms_per_class(detections, args.iou_thres, args.max_det)
+
         # 后处理
-        detections = postprocess(detections, scale_info, img_size)
+        detections = postprocess(detections, scale_info)
         
         # 转换为 YOLO 格式
         if len(detections) > 0:

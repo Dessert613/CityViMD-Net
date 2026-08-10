@@ -77,7 +77,13 @@ class CityViMDNet(nn.Module):
             for index in range(x.shape[0]):
                 image_boxes = boxes[index]
                 max_scores, max_classes = scores[index].max(dim=1)
-                valid = max_scores > conf_thres
+                valid = (
+                    (max_scores > conf_thres) &
+                    torch.isfinite(max_scores) &
+                    torch.isfinite(image_boxes).all(dim=1) &
+                    (image_boxes[:, 2] > image_boxes[:, 0]) &
+                    (image_boxes[:, 3] > image_boxes[:, 1])
+                )
                 image_boxes = image_boxes[valid]
                 max_scores = max_scores[valid]
                 max_classes = max_classes[valid]
@@ -89,12 +95,17 @@ class CityViMDNet(nn.Module):
                 keep_per_class = []
                 for class_id in max_classes.unique():
                     class_indices = torch.where(max_classes == class_id)[0]
+                    if len(class_indices) == 0:
+                        continue
                     class_keep = self._nms(
                         image_boxes[class_indices],
                         max_scores[class_indices],
                         iou_thres,
                     )
                     keep_per_class.append(class_indices[class_keep])
+                if not keep_per_class:
+                    results.append(torch.zeros((0, 6), device=x.device))
+                    continue
                 keep = torch.cat(keep_per_class)
                 keep = keep[max_scores[keep].argsort(descending=True)][:max_det]
                 results.append(torch.cat([
@@ -105,6 +116,8 @@ class CityViMDNet(nn.Module):
         return results
 
     def _nms(self, boxes, scores, iou_thres):
+        if len(boxes) == 0:
+            return torch.zeros((0,), device=boxes.device, dtype=torch.long)
         indices = scores.argsort(descending=True)
         keep = []
         while len(indices) > 0:
@@ -134,13 +147,3 @@ def build_model(cfg):
 def load_config(config_path):
     with open(config_path, 'r', encoding='utf-8') as file:
         return yaml.safe_load(file)
-
-
-if __name__ == '__main__':
-    config = load_config('configs/default.yaml')
-    model = build_model(config).eval()
-    sample = torch.randn(1, 5, 640, 640)
-    with torch.no_grad():
-        outputs, _ = model(sample)
-    print(f"Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M")
-    print([tuple(output.shape) for output in outputs])

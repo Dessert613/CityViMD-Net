@@ -168,11 +168,3 @@ class CSPDarknet(nn.Module):
         p5 = self.stage4(p4)
         
         return [p2, p3, p4, p5]
-
-
-if __name__ == '__main__':
-    sample = torch.randn(1, 5, 640, 640)
-    backbone = CSPDarknet(in_channels=5)
-    features = backbone(sample)
-    for i, f in enumerate(features):
-        print(f"  P{i+2}: {f.shape}")

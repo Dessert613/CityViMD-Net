@@ -282,7 +282,3 @@ def plot_pr_curve(recall, precision, ap, class_name='', save_path=None, show=Fal
         plt.show()
     
     plt.close()
-
-
-if __name__ == '__main__':
-    print("Visualization module loaded successfully")

@@ -10,7 +10,6 @@ import numpy as np
 import cv2
 import torch
 from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
 import yaml
 
 
@@ -53,7 +52,6 @@ class MultimodalDataset(Dataset):
         
         # 获取所有样本ID
         self.sample_ids = self._get_sample_ids()
-        print(f"[{split}] Loaded {len(self.sample_ids)} samples")
     
     def _get_sample_ids(self):
         """获取所有样本ID（不含扩展名）"""
@@ -155,6 +153,14 @@ class MultimodalDataset(Dataset):
                 img = np.zeros((self.img_size[0], self.img_size[1]), dtype=np.uint16)
         else:
             raise ValueError(f"Unknown modality: {modality}")
+
+        if img is None:
+            raise ValueError(f"Failed to decode {modality} image: {path}")
+
+        if modality == 'rgb' and img.ndim != 3:
+            raise ValueError(f"Expected RGB image to have 3 channels: {path}")
+        if modality in {'infrared', 'depth'} and img.ndim != 2:
+            img = img[..., 0]
         
         return img
 
@@ -328,7 +334,7 @@ def collate_fn(batch):
     if labels_list:
         labels = torch.cat(labels_list, dim=0)
     else:
-        labels = torch.zeros((0, 6))
+        labels = torch.zeros((0, 6), dtype=torch.float32)
     
     sample_ids = [item['sample_id'] for item in batch]
     modalities = batch[0]['modalities']
@@ -380,22 +386,3 @@ def load_config(config_path):
     with open(config_path, 'r', encoding='utf-8') as f:
         cfg = yaml.safe_load(f)
     return cfg
-
-
-if __name__ == '__main__':
-    # 测试数据集
-    cfg = load_config('configs/default.yaml')
-    dataset = MultimodalDataset(
-        root_dir='data/',
-        split='train',
-        img_size=(640, 640),
-        num_classes=12,
-        augment=False
-    )
-    print(f"Dataset size: {len(dataset)}")
-    
-    if len(dataset) > 0:
-        sample = dataset[0]
-        print(f"Image shape: {sample['images'].shape}")
-        print(f"Labels shape: {sample['labels'].shape}")
-        print(f"Sample ID: {sample['sample_id']}")
