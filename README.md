@@ -5,6 +5,8 @@
 > City Visual Multimodal Detection Network
 >
 > 参赛队伍：**都是同龄人队**
+>
+> 作者：**Codex / Claude**
 
 ## 📖 项目简介
 
