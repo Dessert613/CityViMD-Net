@@ -138,6 +138,7 @@ class YOLOv8Head(nn.Module):
         all_scores = []
         
         for i, pred in enumerate(predictions):
+            pred = pred.float()
             B, C, H, W = pred.shape
             
             # 分离分类和回归
@@ -175,6 +176,15 @@ class YOLOv8Head(nn.Module):
             # reshape
             boxes = boxes.view(B, -1, 4)
             scores = scores.view(B, -1, self.num_classes)
+
+            valid = (
+                (boxes[..., 2] > boxes[..., 0]) &
+                (boxes[..., 3] > boxes[..., 1]) &
+                torch.isfinite(boxes).all(dim=-1) &
+                torch.isfinite(scores).all(dim=-1)
+            )
+            boxes = boxes * valid.unsqueeze(-1)
+            scores = scores * valid.unsqueeze(-1)
             
             all_boxes.append(boxes)
             all_scores.append(scores)
@@ -201,36 +211,3 @@ def build_head(cfg, in_channels):
     )
     
     return head
-
-
-if __name__ == '__main__':
-    # 测试检测头
-    batch_size = 2
-    num_classes = 12
-    in_channels = [128, 256, 512]
-    sizes = [80, 40, 20]
-    
-    features = [
-        torch.randn(batch_size, c, s, s)
-        for c, s in zip(in_channels, sizes)
-    ]
-    
-    head = YOLOv8Head(num_classes=num_classes, in_channels=in_channels, reg_max=16)
-    
-    print("Input shapes:")
-    for i, f in enumerate(features):
-        print(f"  P{i+3}: {f.shape}")
-    
-    predictions = head(features)
-    
-    print("\nOutput shapes:")
-    for i, p in enumerate(predictions):
-        print(f"  P{i+3}: {p.shape}")
-    
-    # 解码测试
-    boxes, scores = head.decode(predictions, img_size=(640, 640))
-    print(f"\nDecoded boxes: {boxes.shape}")
-    print(f"Decoded scores: {scores.shape}")
-    
-    params = sum(p.numel() for p in head.parameters())
-    print(f"\nHead Params: {params / 1e6:.2f}M")

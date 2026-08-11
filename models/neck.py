@@ -105,30 +105,3 @@ def build_neck(cfg, in_channels):
         raise ValueError(f"Unsupported neck type: {neck_cfg['type']}")
     
     return neck
-
-
-if __name__ == '__main__':
-    # 测试 Neck
-    batch_size = 2
-    channels = [64, 128, 256, 512]  # P2, P3, P4, P5
-    sizes = [160, 80, 40, 20]
-    
-    features = [
-        torch.randn(batch_size, c, s, s) 
-        for c, s in zip(channels, sizes)
-    ]
-    
-    neck = YOLOv8Neck(channels, depth_multiple=0.67)
-    
-    print("Input shapes:")
-    for i, f in enumerate(features):
-        print(f"  P{i+2}: {f.shape}")
-    
-    outputs = neck(features)
-    
-    print("\nOutput shapes:")
-    for i, f in enumerate(outputs):
-        print(f"  P{i+3}: {f.shape}")
-    
-    params = sum(p.numel() for p in neck.parameters())
-    print(f"\nNeck Params: {params / 1e6:.2f}M")

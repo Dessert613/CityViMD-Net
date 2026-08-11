@@ -67,6 +67,9 @@ train:
   epochs: 300
   batch_size: 4
   workers: 4
+  amp: true
+  use_ema: true
+  ema_decay: 0.9999
   
   # 优化器
   optimizer:
