@@ -27,6 +27,7 @@ def main():
 
     data_cfg = cfg["data"]
     split_dir = data_cfg.get(f"{args.split}_dir", args.split)
+    depth_validity_mask = bool(data_cfg.get("depth_validity_mask", False))
     dataset = MultimodalDataset(
         root_dir=data_cfg["root"],
         split=split_dir,
@@ -35,14 +36,18 @@ def main():
         augment=False,
         modalities=data_cfg["modalities"],
         strict_modalities=True,
+        depth_validity_mask=depth_validity_mask,
+        depth_encoding=data_cfg.get("depth_encoding", "linear"),
+        ir_encoding=data_cfg.get("ir_encoding", "raw"),
     )
+    expected_channels = 5 + (1 if depth_validity_mask else 0)
     total_boxes = 0
     for index in range(len(dataset)):
         sample = dataset[index]
-        if sample["images"].shape[0] != 5:
+        if sample["images"].shape[0] != expected_channels:
             raise RuntimeError(
                 f"Unexpected channel count for {sample['sample_id']}: "
-                f"{sample['images'].shape}"
+                f"expected {expected_channels}, got {sample['images'].shape}"
             )
         total_boxes += len(sample["labels"])
     print(f"DATASET_OK split={args.split} samples={len(dataset)} boxes={total_boxes}")

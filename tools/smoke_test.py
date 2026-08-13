@@ -32,7 +32,7 @@ def main():
         [1, 6, 0.35, 0.40, 0.20, 0.20],
     ], dtype=torch.float32)
 
-    predictions, modality_weights = model(images)
+    predictions = model(images)
     loss_fn = build_loss(model, cfg)
     loss, loss_items = loss_fn(predictions, targets, img_size=(64, 64))
     if not torch.isfinite(loss):
@@ -43,7 +43,6 @@ def main():
     detections = model.predict(images[:1], conf_thres=0.99, max_det=100)
     print("SMOKE_TEST_OK")
     print("prediction_shapes:", [tuple(item.shape) for item in predictions])
-    print("modality_weight_shapes:", [tuple(item.shape) for item in modality_weights])
     print("loss:", loss_items)
     print("detections:", tuple(detections[0].shape))
 

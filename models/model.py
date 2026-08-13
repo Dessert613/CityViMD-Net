@@ -26,6 +26,18 @@ class CityViMDNet(nn.Module):
 
         self.modalities = data_cfg['modalities']
         self.num_classes = data_cfg['num_classes']
+
+        if 'depth' in self.modalities:
+            depth_mask = bool(data_cfg.get('depth_validity_mask', False))
+            expected_depth = 2 if depth_mask else 1
+            configured_depth = model_cfg['in_channels']['depth']
+            if configured_depth != expected_depth:
+                raise ValueError(
+                    f"in_channels.depth must be {expected_depth} when "
+                    f"data.depth_validity_mask={depth_mask}, "
+                    f"got {configured_depth}"
+                )
+
         self.input_channels = [model_cfg['in_channels'][m] for m in self.modalities]
         total_channels = sum(self.input_channels)
 
@@ -58,18 +70,13 @@ class CityViMDNet(nn.Module):
                 f"Expected {expected_channels} early-fusion channels, got {x.shape[1]}"
             )
         features = self.backbone(x)
-        predictions = self.head(self.neck(features))
-        uniform_weights = x.new_full(
-            (x.shape[0], len(self.modalities)), 1.0 / len(self.modalities)
-        )
-        modality_weights = [uniform_weights for _ in features]
-        return predictions, modality_weights
+        return self.head(self.neck(features))
 
     def predict(self, x, conf_thres=0.25, iou_thres=0.45, max_det=100):
         """返回每张图的 [x1, y1, x2, y2, confidence, class]。"""
         self.eval()
         with torch.no_grad():
-            predictions, _ = self.forward(x)
+            predictions = self.forward(x)
             boxes, scores = self.head.decode(
                 predictions, img_size=(x.shape[2], x.shape[3])
             )

@@ -1,0 +1,53 @@
+name: Bug report
+description: 报告公开基线中可复现的缺陷
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请勿上传比赛数据、测试集预测、私有权重、访问凭据或受限制日志。
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 说明实际行为与预期行为。
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 最小复现步骤
+      description: 提供不依赖私有材料的最小命令或代码。
+      placeholder: |
+        1. 使用配置……
+        2. 运行命令……
+        3. 观察到……
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: 运行环境
+      description: Python、PyTorch、操作系统和硬件版本。
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 脱敏日志
+      description: 粘贴已经移除本地路径、凭据和受限制数据的错误信息。
+      render: shell
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: 发布确认
+      options:
+        - label: 我确认内容不含比赛数据、私有权重、预测结果或访问凭据。
+          required: true

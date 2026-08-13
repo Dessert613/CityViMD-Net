@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+message: "If you use this public baseline, please cite the repository."
+title: "CityViMD-Net: A Reproducible RGB-Infrared-Depth Early-Fusion Baseline"
+type: software
+authors:
+  - family-names: "CityViMD-Net contributors"
+repository-code: "https://github.com/forever-ivy/CityViMD-Net"
+url: "https://github.com/forever-ivy/CityViMD-Net"
+license: MIT

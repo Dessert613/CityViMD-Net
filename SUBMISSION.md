@@ -1,21 +1,29 @@
-# CityViMD-Net 提交说明
+# CityViMD-Net 运行与打包说明
 
-本仓库提供训练、验证、推理、结果校验和源码打包流程。比赛最终提交仍需要使用
-官方训练数据训练得到的 `best.pt`，并在官方测试集上生成预测文件。仓库不包含
-数据或训练权重，性能成绩详见项目记录。
+本仓库提供公开基线的训练、验证、推理、预测校验和源码打包流程。仓库不包含数据、
+训练权重或测试集预测。使用比赛数据、预训练权重和提交文件前，请先确认对应赛事
+规则及数据许可。
 
 ## 1. 环境
 
-推荐 Python 3.10、PyTorch 2.x 和 CUDA 11.8 以上版本。
+推荐 Python 3.10、PyTorch 2.x。
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 python tools/smoke_test.py
 ```
 
-## 2. 数据目录
+开发与测试环境：
 
-三种模态必须具有完全相同的文件名和原始高宽：
+```bash
+python -m pip install -r requirements-dev.txt
+pytest
+```
+
+## 2. 数据准备
 
 ```text
 data/
@@ -35,12 +43,15 @@ data/
     └── depth/*.png
 ```
 
-训练前执行：
+三种模态必须具有完全相同的文件名和原始高宽。训练前执行：
 
 ```bash
 python tools/validate_dataset.py --split train
 python tools/validate_dataset.py --split val
 ```
+
+数据校验只确认目录、文件对应关系、图像尺寸和标签格式，不代替人工检查数据许可、
+类别定义和标注质量。
 
 ## 3. 训练
 
@@ -48,19 +59,35 @@ python tools/validate_dataset.py --split val
 python train.py --config configs/default.yaml
 ```
 
-最佳权重默认保存至 `runs/train/weights/best.pt`。恢复训练：
+默认输出：
+
+```text
+runs/train/
+├── config.yaml
+├── logs/
+├── checkpoints/
+└── weights/
+    ├── last.pt
+    └── best.pt
+```
+
+恢复训练：
 
 ```bash
-python train.py --config configs/default.yaml \
+python train.py \
+  --config configs/default.yaml \
   --resume runs/train/weights/last.pt
 ```
 
-默认训练配置已启用 `AMP` 和 `EMA`，对应开关见 `configs/default.yaml` 中的 `train.amp`、`train.use_ema` 和 `train.ema_decay`。
+默认配置启用 AMP 和 EMA。随机种子、优化器、损失权重及验证间隔均记录在
+`configs/default.yaml` 中。正式记录基准时还应保存代码提交、环境和原始日志，
+详见 [`docs/reproducibility.md`](docs/reproducibility.md)。
 
-## 4. 生成和验证预测
+## 4. 推理与结果校验
 
 ```bash
-python test.py --config configs/default.yaml \
+python test.py \
+  --config configs/default.yaml \
   --weights runs/train/weights/best.pt \
   --input data/test \
   --output runs/test/predictions \
@@ -74,77 +101,53 @@ python tools/validate_predictions.py \
   --predictions runs/test/predictions
 ```
 
-输出 ZIP 位于 `runs/test/predictions.zip`。脚本会为每张测试图创建同名 TXT；
-未检测到目标时生成空文件，每张图最多保留 100 个检测框。
+输出 ZIP 位于 `runs/test/predictions.zip`。每张输入图像必须存在同名 TXT；
+未检测到目标时生成空文件。每行格式为：
 
-如果需要更稳的提交结果，可以在 `test.py` 中附加 `--tta` 启用简单水平翻转测试时增强。
-
-如果想把整条链路一次性跑完，可以使用：
-
-```bash
-python tools/validate_pipeline.py --train --test --package
+```text
+class_id cx cy w h confidence
 ```
 
-如果需要连同 TTA、数据校验和预测文件校验一起跑完，可以使用：
+`--tta` 可启用简单水平翻转测试时增强。该选项只是公开基线能力，不表示它在任意
+数据集上都会提升指标。
+
+## 5. 组合校验
+
+基础链路：
 
 ```bash
-python tools/validate_pipeline.py --split train --train --test --package --tta
+python tools/validate_pipeline.py --split train
 ```
 
-常用参数还包括：
+包含训练、推理、预测校验和源码打包的完整链路：
 
-- `--split train|val`：选择先校验哪个数据划分
-- `--weights runs/train/weights/best.pt`：指定测试权重
-- `--test-input data/test`：指定测试输入目录
-- `--test-output runs/test/predictions`：指定预测输出目录
-- `--tta`：测试时启用翻转增强
-- `--skip-smoke`：跳过冒烟测试
-- `--skip-predictions`：跳过预测结果文件校验
+```bash
+python tools/validate_pipeline.py \
+  --split train \
+  --train \
+  --test \
+  --package
+```
 
-## 5. 打包源码
+完整链路需要本地数据和训练权重，运行成本较高。持续集成只运行不依赖比赛数据的
+单元测试、模型冒烟测试和源码打包检查。
+
+## 6. 打包源码
 
 ```bash
 python tools/package_submission.py
 ```
 
-源码压缩包生成于 `runs/submission/cityvimd_source.zip`。半决赛提交时还需按官方
-要求附上预测 ZIP、训练权重、运行环境说明和技术报告。
+源码压缩包生成于 `runs/submission/cityvimd_source.zip`。打包脚本不会包含
+`data/`、`runs/`、权重或预测结果。
 
-## 提交前检查表
+## 发布或提交前检查表
 
-- 数据校验脚本通过
-- 冒烟测试通过
-- 训练日志中无 NaN/Inf
-- 使用最佳验证集 mAP@50-95 对应的权重
-- 测试图与预测 TXT 数量完全一致
-- 预测校验脚本通过
-- ZIP 根目录直接包含 TXT 文件，没有多余目录层级
-- 技术报告中的模型、参数和成绩均与最终提交一致
-
-## 6. 工程规划
-
-下面这份规划用于把当前方案拆成可执行、可验证的工程步骤，避免只停留在概念层面。
-
-| 阶段 | 目标 | 主要工作 | 产出 |
-|---|---|---|---|
-| 阶段 A | 数据与链路稳定 | 校验三模态文件名、高宽、深度读取、标签格式、空预测和 ZIP 结构 | 可重复的训练/推理闭环 |
-| 阶段 B | 基线收敛 | 固化五通道早期融合、共享骨干、PAN 和检测头的主干配置 | 可复现的基线权重 |
-| 阶段 C | 表征增强 | 增加模态对齐与轻量融合控制 | 更稳定的跨模态特征 |
-| 阶段 D | 训练提效 | 调整损失权重、学习率策略、warmup、EMA 与混合精度 | 更优的收敛质量 |
-| 阶段 E | 后处理优化 | 类别感知 NMS、阈值搜索、TTA 和最大检测数控制 | 更稳的提交结果 |
-| 阶段 F | 冲分验证 | 做消融、复核随机种子、输出格式和提交包 | 最终提交版本 |
-
-### 当前状态
-
-- 阶段 A：已完成
-- 阶段 B：已完成
-- 阶段 C：已完成小步迭代，增强版待做
-- 阶段 D：已完成主要调参，EMA/AMP 待评估
-- 阶段 E：已完成小步迭代，TTA 待评估
-- 阶段 F：已完成复核提交版本，最高分记录为 **64.233**
-
-### 下一步建议
-
-- 如果目标是继续冲分，优先做阶段 C 和阶段 E 的小步迭代。
-- 如果目标是正式提交，优先冻结配置、复查输出并固定最终权重。
-- 如果目标是写技术报告，优先整理每个阶段的实验依据和消融结论。
+- 已确认赛事规则允许对应代码、数据和权重的使用方式；
+- 数据校验、单元测试和冒烟测试全部通过；
+- 训练日志中没有 NaN 或 Inf；
+- 记录了配置、代码提交、随机种子、依赖版本和硬件环境；
+- 测试图像与预测 TXT 数量完全一致；
+- 预测文件字段、范围与 ZIP 层级通过校验；
+- 源码包中不含数据、权重、凭据、私有日志或测试集预测；
+- 文档中的结构和成绩均可由公开产物验证。

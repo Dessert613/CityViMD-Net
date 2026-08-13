@@ -62,6 +62,10 @@ def compute_ap(recall, precision):
 def compute_map(predictions, targets, num_classes=12, iou_thresholds=None):
     """
     计算 mAP@50-95
+
+    协议与 pycocotools（COCO 官方实现）对齐：贪心匹配在未占用的 GT 中取
+    最大 IoU，101 点插值，无 GT 的类别不参与平均。
+    一致性由 tests/test_metrics_pycoco_parity.py 保证。
     
     Args:
         predictions: list of predictions for each image
@@ -103,21 +107,22 @@ def compute_map(predictions, targets, num_classes=12, iou_thresholds=None):
                 class_gts[cls].append((img_idx, box))
     
     # 计算每个类别的 AP
-    ap_per_iou = defaultdict(list)  # {iou_thresh: [ap_per_class]}
-    
+    # 口径与 pycocotools 对齐：数据集中没有 GT 的类别不参与 mAP 平均；
+    # 有 GT 但没有预测的类别按 AP=0 计入。
+    ap_per_iou = defaultdict(list)  # {iou_thresh: [ap_per_class_with_gt]}
+    ap50_per_class = [0.0] * num_classes
+
     for cls in range(num_classes):
         # 获取该类别的所有预测
         cls_pred = class_preds.get(cls, [])
         cls_gt = class_gts.get(cls, [])
-        
+
         if len(cls_gt) == 0:
-            # 没有真实框，AP 为 0
-            for iou_thresh in iou_thresholds:
-                ap_per_iou[iou_thresh].append(0.0)
+            # 无 GT 类别：排除在平均之外（COCO 协议）
             continue
-        
+
         if len(cls_pred) == 0:
-            # 没有预测，AP 为 0
+            # 有 GT 无预测：AP=0 计入平均
             for iou_thresh in iou_thresholds:
                 ap_per_iou[iou_thresh].append(0.0)
             continue
@@ -167,14 +172,16 @@ def compute_map(predictions, targets, num_classes=12, iou_thresholds=None):
                 # 计算 IoU
                 pred_box_np = np.array(pred_box).reshape(1, 4)
                 ious = box_iou(pred_box_np, gt_boxes)[0]
-                
-                # 找最大 IoU
-                max_iou_idx = np.argmax(ious)
-                max_iou = ious[max_iou_idx]
-                
-                if max_iou >= iou_thresh and not gt_matched[img_idx][max_iou_idx]:
+
+                # COCO 协议：在「尚未匹配」的 GT 中取 IoU 最大者，达阈值记 TP。
+                # 已匹配的 GT 不可重复占用，但不阻止该预测匹配其余空闲 GT。
+                candidates = ious.copy()
+                candidates[np.array(gt_matched[img_idx], dtype=bool)] = -1.0
+                best_gt_idx = int(np.argmax(candidates))
+
+                if candidates[best_gt_idx] >= iou_thresh:
                     tp[pred_idx] = 1
-                    gt_matched[img_idx][max_iou_idx] = True
+                    gt_matched[img_idx][best_gt_idx] = True
                 else:
                     fp[pred_idx] = 1
             
@@ -191,27 +198,24 @@ def compute_map(predictions, targets, num_classes=12, iou_thresholds=None):
             # 计算 AP
             ap, _, _ = compute_ap(recall, precision)
             ap_per_iou[iou_thresh].append(ap)
+            if np.isclose(iou_thresh, 0.5):
+                ap50_per_class[cls] = float(ap)
     
-    # 计算 mAP
+    # 计算 mAP（整个数据集没有任何 GT 时全部指标记 0）
     results = {}
-    
-    # mAP@50
-    map50 = float(np.mean(ap_per_iou[0.50]))
-    results['map50'] = map50
-    
-    # mAP@75
-    map75 = float(np.mean(ap_per_iou[0.75]))
-    results['map75'] = map75
-    
-    # mAP@50-95
-    all_aps = []
-    for iou_thresh in iou_thresholds:
-        all_aps.append(np.mean(ap_per_iou[iou_thresh]))
-    map50_95 = float(np.mean(all_aps))
-    results['map50_95'] = map50_95
-    
-    # 每个类别的 AP@50
-    results['ap_per_class_50'] = ap_per_iou[0.5]
+    has_gt = len(ap_per_iou[iou_thresholds[0]]) > 0
+
+    results['map50'] = float(np.mean(ap_per_iou[0.50])) if has_gt else 0.0
+    results['map75'] = float(np.mean(ap_per_iou[0.75])) if has_gt else 0.0
+
+    if has_gt:
+        all_aps = [np.mean(ap_per_iou[iou_thresh]) for iou_thresh in iou_thresholds]
+        results['map50_95'] = float(np.mean(all_aps))
+    else:
+        results['map50_95'] = 0.0
+
+    # 每类 AP@50（无 GT 的类别显示 0.0，但不参与上面的平均）
+    results['ap_per_class_50'] = ap50_per_class
     
     return results
 
