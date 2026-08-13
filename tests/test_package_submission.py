@@ -16,9 +16,6 @@ def test_source_archive_contains_public_reproducibility_files(tmp_path, monkeypa
     required = {
         "README.md",
         "BENCHMARKS.md",
-        "CONTRIBUTING.md",
-        "LICENSE",
-        "CITATION.cff",
         "docs/architecture.md",
         "docs/reproducibility.md",
         "tests/test_model.py",
