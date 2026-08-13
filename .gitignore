@@ -2,14 +2,31 @@
 data/
 runs/
 tmp/
+wandb/
+mlruns/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.zip
 
 # Python caches and local environments
 __pycache__/
 *.py[cod]
 *.pyo
 .pytest_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
 .venv/
 venv/
+
+# Local credentials and machine-specific configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
 
 # IDE and OS metadata
 .idea/

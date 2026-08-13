@@ -16,7 +16,7 @@ import zipfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from models.model import build_model
-from datasets.multimodal_dataset import load_config
+from datasets.multimodal_dataset import encode_depth, encode_infrared, load_config
 
 
 def parse_args():
@@ -40,7 +40,11 @@ def parse_args():
     parser.add_argument('--zip', action='store_true',
                         help='打包结果为 zip')
     parser.add_argument('--tta', action='store_true',
-                        help='启用简单翻转 TTA')
+                        help='启用水平翻转 TTA')
+    parser.add_argument('--tta-scales', type=str, default='',
+                        help='多尺度 TTA，如 "0.75,1.0,1.25"（留空 = 单尺度）')
+    parser.add_argument('--tta-iou', type=float, default=0.55,
+                        help='TTA 视角间 WBF 融合的 IoU 阈值')
     return parser.parse_args()
 
 
@@ -70,8 +74,9 @@ def load_image(modality, path, img_size):
     return img
 
 
-def preprocess(images, img_size):
-    """图像预处理"""
+def preprocess(images, img_size, depth_validity_mask=False,
+               depth_encoding='linear', ir_encoding='raw'):
+    """图像预处理（与训练侧 datasets.multimodal_dataset 共享编码实现）"""
     h, w = img_size
     modality_shapes = {name: image.shape[:2] for name, image in images.items()}
     if len(set(modality_shapes.values())) != 1:
@@ -101,7 +106,7 @@ def preprocess(images, img_size):
     ir_resized = cv2.resize(ir, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
     ir_padded = np.zeros((h, w), dtype=np.uint8)
     ir_padded[pad_h:pad_h+new_h, pad_w:pad_w+new_w] = ir_resized
-    ir_norm = ir_padded.astype(np.float32) / 255.0
+    ir_norm = encode_infrared(ir_padded, ir_encoding)
     processed['infrared'] = torch.from_numpy(ir_norm).unsqueeze(0).float()
     
     # Depth
@@ -109,8 +114,14 @@ def preprocess(images, img_size):
     depth_resized = cv2.resize(depth, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
     depth_padded = np.zeros((h, w), dtype=np.uint16)
     depth_padded[pad_h:pad_h+new_h, pad_w:pad_w+new_w] = depth_resized
-    depth_norm = np.clip(depth_padded.astype(np.float32) / 20000.0, 0, 1)
-    processed['depth'] = torch.from_numpy(depth_norm).unsqueeze(0).float()
+    depth_norm = encode_depth(depth_padded.astype(np.float32), depth_encoding)
+    depth_channels = [torch.from_numpy(depth_norm)]
+    if depth_validity_mask:
+        # 与训练侧一致：0 深度（含 letterbox 填充）视为无效
+        depth_channels.append(
+            torch.from_numpy((depth_padded > 0).astype(np.float32))
+        )
+    processed['depth'] = torch.stack(depth_channels, dim=0).float()
     
     # 拼接
     input_tensor = torch.cat([processed['rgb'], 
@@ -215,6 +226,55 @@ def flip_boxes_horizontally(detections, width):
     return flipped
 
 
+def _round_to_stride(value, stride=32):
+    """TTA 尺度对齐到骨干步长的整数倍。"""
+    return max(stride, int(round(value / stride)) * stride)
+
+
+def weighted_box_fusion(detections, iou_thres, num_views, max_det):
+    """单模型 TTA 的逐类加权框融合（WBF 简化实现）。
+
+    Args:
+        detections: [N, 6] (x1, y1, x2, y2, conf, cls)，各视角结果
+            已映射回原图坐标后拼接
+        num_views: TTA 视角总数；簇分数按 min(簇大小, num_views)/num_views
+            缩放，奖励跨视角共识
+    """
+    if len(detections) == 0:
+        return detections
+    fused_all = []
+    classes = detections[:, 5].astype(int)
+    for cls_id in np.unique(classes):
+        cls_det = detections[classes == cls_id]
+        cls_det = cls_det[np.argsort(-cls_det[:, 4])]
+        clusters = []
+        fused = []
+        for row in cls_det:
+            matched = False
+            for index, box in enumerate(fused):
+                if _box_iou_np(box[:4], row[None, :4])[0] > iou_thres:
+                    clusters[index].append(row)
+                    members = np.stack(clusters[index])
+                    weights = np.maximum(members[:, 4], 1e-7)
+                    box[:4] = (
+                        (members[:, :4] * weights[:, None]).sum(axis=0)
+                        / weights.sum()
+                    )
+                    box[4] = members[:, 4].mean()
+                    matched = True
+                    break
+            if not matched:
+                clusters.append([row])
+                fused.append(row.copy())
+        for index, box in enumerate(fused):
+            box[4] *= min(len(clusters[index]), num_views) / num_views
+            box[5] = cls_id
+            fused_all.append(box)
+    fused_all = np.stack(fused_all)
+    fused_all = fused_all[np.argsort(-fused_all[:, 4])]
+    return fused_all[:max_det]
+
+
 def main():
     args = parse_args()
     
@@ -266,6 +326,25 @@ def main():
     
     img_size = tuple(cfg['data']['img_size'])
     modalities = cfg['data']['modalities']
+    depth_validity_mask = bool(cfg['data'].get('depth_validity_mask', False))
+    depth_encoding = cfg['data'].get('depth_encoding', 'linear')
+    ir_encoding = cfg['data'].get('ir_encoding', 'raw')
+
+    # TTA 视角集合：尺度 × 水平翻转（均为同一模型的多次前向）
+    tta_scales = [1.0]
+    if args.tta_scales:
+        tta_scales = [
+            float(value) for value in args.tta_scales.split(',') if value.strip()
+        ]
+    flips = [False, True] if args.tta else [False]
+    view_sizes = [
+        (_round_to_stride(img_size[0] * scale), _round_to_stride(img_size[1] * scale))
+        for scale in tta_scales
+    ]
+    num_views = len(view_sizes) * len(flips)
+    if num_views > 1:
+        print(f"TTA enabled: sizes={view_sizes}, flips={flips} "
+              f"({num_views} views, WBF iou={args.tta_iou})")
     
     # 推理
     print("\nRunning inference...")
@@ -276,36 +355,47 @@ def main():
             img_path = os.path.join(input_dir, mod, f"{sample_id}.png")
             images[mod] = load_image(mod, img_path, img_size)
         
-        # 预处理
-        input_tensor, scale_info = preprocess(images, img_size)
-        input_tensor = input_tensor.unsqueeze(0).to(device)
-        if use_half:
-            input_tensor = input_tensor.half()
-        
-        # 推理
-        with torch.no_grad():
-            results = model.predict(
-                input_tensor,
-                conf_thres=args.conf_thres,
-                iou_thres=args.iou_thres,
-                max_det=args.max_det
+        # 逐视角推理：每个视角单独预处理并映射回原图坐标，再统一融合
+        view_detections = []
+        scale_info = None
+        for view_size in view_sizes:
+            input_tensor, view_scale_info = preprocess(
+                images, view_size,
+                depth_validity_mask=depth_validity_mask,
+                depth_encoding=depth_encoding,
+                ir_encoding=ir_encoding,
             )
-            detections = results[0].cpu().numpy()
-            if args.tta:
-                flipped_tensor = torch.flip(input_tensor, dims=[3])
-                tta_results = model.predict(
-                    flipped_tensor,
-                    conf_thres=args.conf_thres,
-                    iou_thres=args.iou_thres,
-                    max_det=args.max_det
-                )
-                tta_det = tta_results[0].cpu().numpy()
-                tta_det[:, :4] = flip_boxes_horizontally(tta_det[:, :4], img_size[1])
-                detections = np.concatenate([detections, tta_det], axis=0) if len(tta_det) else detections
-                detections = nms_per_class(detections, args.iou_thres, args.max_det)
+            if scale_info is None:
+                scale_info = view_scale_info  # 各视角 orig_w/h 相同
+            base_tensor = input_tensor.unsqueeze(0).to(device)
+            if use_half:
+                base_tensor = base_tensor.half()
+            for flip in flips:
+                tensor = torch.flip(base_tensor, dims=[3]) if flip else base_tensor
+                with torch.no_grad():
+                    results = model.predict(
+                        tensor,
+                        conf_thres=args.conf_thres,
+                        iou_thres=args.iou_thres,
+                        max_det=args.max_det
+                    )
+                det = results[0].cpu().numpy()
+                if flip and len(det):
+                    det[:, :4] = flip_boxes_horizontally(det[:, :4], view_size[1])
+                det = postprocess(det, view_scale_info)
+                view_detections.append(det)
 
-        # 后处理
-        detections = postprocess(detections, scale_info)
+        if num_views > 1:
+            nonempty = [det for det in view_detections if len(det)]
+            if nonempty:
+                stacked = np.concatenate(nonempty, axis=0)
+                detections = weighted_box_fusion(
+                    stacked, args.tta_iou, num_views, args.max_det
+                )
+            else:
+                detections = np.zeros((0, 6), dtype=np.float32)
+        else:
+            detections = view_detections[0]
         
         # 转换为 YOLO 格式
         if len(detections) > 0:

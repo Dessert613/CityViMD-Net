@@ -1,0 +1,4 @@
+-r requirements.txt
+
+pytest>=8.0
+pycocotools>=2.0.7  # mAP 评测器对拍测试依赖

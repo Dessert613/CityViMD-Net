@@ -5,6 +5,7 @@ CityViMD-Net 训练脚本
 import os
 import sys
 import argparse
+import json
 import time
 import yaml
 import numpy as np
@@ -18,7 +19,11 @@ from tqdm import tqdm
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from models.model import build_model
-from datasets.multimodal_dataset import build_dataloader, load_config
+from datasets.multimodal_dataset import (
+    build_dataloader,
+    load_config,
+    load_fold_assignments,
+)
 from utils.loss import build_loss
 from utils.metrics import evaluate, format_metric_summary, format_class_summary
 from utils.ema import ModelEMA
@@ -48,6 +53,10 @@ def parse_args():
                         help='早停耐心值（覆盖配置文件）')
     parser.add_argument('--no-ema', action='store_true',
                         help='关闭 EMA')
+    parser.add_argument('--folds', type=str, default=None,
+                        help='交叉验证折划分文件（tools/make_folds.py 生成）')
+    parser.add_argument('--fold', type=int, default=None,
+                        help='当前验证折编号（与 --folds 联用）')
     return parser.parse_args()
 
 
@@ -153,7 +162,7 @@ def train_one_epoch(model, dataloader, optimizer, loss_fn, device, epoch,
         
         # 前向传播
         with torch.cuda.amp.autocast(enabled=use_amp):
-            predictions, mod_weights = model(images)
+            predictions = model(images)
 
             # 计算损失
             loss, loss_items = loss_fn(predictions, labels, img_size)
@@ -308,8 +317,28 @@ def main():
     
     # 构建数据加载器
     print("Building dataloaders...")
-    train_loader = build_dataloader(cfg, split='train')
-    val_loader = build_dataloader(cfg, split='val')
+    if (args.folds is None) != (args.fold is None):
+        raise SystemExit("--folds and --fold must be provided together")
+    if args.folds is not None:
+        # 交叉验证：训练/验证折均来自训练目录
+        assignments = load_fold_assignments(args.folds)
+        train_ids = sorted(
+            sid for sid, fold in assignments.items() if fold != args.fold
+        )
+        val_ids = sorted(
+            sid for sid, fold in assignments.items() if fold == args.fold
+        )
+        if not val_ids:
+            raise SystemExit(f"Fold {args.fold} has no validation samples")
+        print(f"Cross-validation fold {args.fold}: "
+              f"train={len(train_ids)}, val={len(val_ids)}")
+        train_loader = build_dataloader(cfg, split='train', sample_ids=train_ids)
+        val_loader = build_dataloader(
+            cfg, split='train', sample_ids=val_ids, eval_mode=True
+        )
+    else:
+        train_loader = build_dataloader(cfg, split='train')
+        val_loader = build_dataloader(cfg, split='val')
     print(f"Train samples: {len(train_loader.dataset)}")
     print(f"Val samples: {len(val_loader.dataset)}")
     
@@ -375,8 +404,13 @@ def main():
     num_classes = cfg['data']['num_classes']
     patience = cfg['train'].get('early_stopping', {}).get('patience', 0)
     epochs_without_improvement = 0
+    best_epoch = -1
+    last_epoch = start_epoch - 1
+    early_stopped = False
+    metrics_path = os.path.join(output_dir, 'metrics.jsonl')
     
     for epoch in range(start_epoch, epochs):
+        last_epoch = epoch
         epoch_start = time.time()
         # 训练
         train_metrics = train_one_epoch(
@@ -450,6 +484,7 @@ def main():
             is_best = val_results['map50_95'] > best_map
             if is_best:
                 best_map = val_results['map50_95']
+                best_epoch = epoch
                 epochs_without_improvement = 0
                 print(f"New best mAP@50-95: {best_map:.4f}")
             else:
@@ -474,6 +509,21 @@ def main():
                     model_state_dict=model_ema.state_dict(),
                 )
             print(f"Checkpoint saved. best_map={best_map:.4f}, patience_counter={epochs_without_improvement}")
+
+            # 机器可读指标（tools/aggregate_results.py 汇总用）
+            with open(metrics_path, 'a', encoding='utf-8') as metrics_file:
+                metrics_file.write(json.dumps({
+                    'epoch': epoch,
+                    'loss': train_metrics['loss'],
+                    'loss_box': train_metrics['loss_box'],
+                    'loss_cls': train_metrics['loss_cls'],
+                    'loss_dfl': train_metrics['loss_dfl'],
+                    'lr': current_lr,
+                    'map50': val_results['map50'],
+                    'map75': val_results['map75'],
+                    'map50_95': val_results['map50_95'],
+                    'best_map50_95': best_map,
+                }) + '\n')
         
         # 定期保存
         elif (epoch + 1) % save_interval == 0:
@@ -488,11 +538,23 @@ def main():
 
         if patience > 0 and epochs_without_improvement >= patience:
             print(f"Early stopping: no mAP improvement for {patience} epochs")
+            early_stopped = True
             break
     
     # 训练结束
     print(f"\nTraining completed!")
     print(f"Best mAP@50-95: {best_map:.4f}")
+
+    summary_path = os.path.join(output_dir, 'summary.json')
+    with open(summary_path, 'w', encoding='utf-8') as summary_file:
+        json.dump({
+            'best_map50_95': best_map,
+            'best_epoch': best_epoch,
+            'epochs_completed': last_epoch + 1,
+            'early_stopped': early_stopped,
+            'seed': cfg['device']['seed'],
+        }, summary_file, ensure_ascii=False, indent=2)
+    print(f"Summary written: {summary_path}")
     
     writer.close()
     

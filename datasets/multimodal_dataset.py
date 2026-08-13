@@ -5,12 +5,74 @@ CityViMD-Net 多模态数据集加载模块
 
 import os
 import glob
+import hashlib
+import json
 import random
 import numpy as np
 import cv2
 import torch
 from torch.utils.data import Dataset, DataLoader
 import yaml
+
+
+DEPTH_MAX_MM = 20000.0
+DEPTH_ENCODINGS = ('linear', 'inverse', 'log', 'minmax')
+IR_ENCODINGS = ('raw', 'clahe', 'percentile')
+
+
+def file_sha256(path, chunk_size=1 << 20):
+    """计算文件 SHA-256（用于测试集哈希黑名单守卫）。"""
+    digest = hashlib.sha256()
+    with open(path, 'rb') as file:
+        while True:
+            chunk = file.read(chunk_size)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def encode_depth(depth, encoding='linear'):
+    """深度编码（输入毫米 float32，输出 [0,1] float32）。
+
+    官方约定深度 0 或过小为无效；所有编码下无效像素统一输出 0，
+    「无效」与「极近」的区分交给可选的有效性掩码通道。
+    """
+    depth = np.clip(depth.astype(np.float32), 0.0, DEPTH_MAX_MM)
+    valid = depth > 0
+    if encoding == 'linear':
+        value = depth / DEPTH_MAX_MM
+    elif encoding == 'inverse':
+        # 逆深度：近处分辨率高，1000mm 处约 0.5
+        value = np.where(valid, 1000.0 / (1000.0 + depth), 0.0)
+    elif encoding == 'log':
+        value = np.where(valid, np.log1p(depth) / np.log1p(DEPTH_MAX_MM), 0.0)
+    elif encoding == 'minmax':
+        if valid.any():
+            valid_values = depth[valid]
+            dmin = float(valid_values.min())
+            dmax = float(valid_values.max())
+            value = np.where(valid, (depth - dmin) / max(dmax - dmin, 1.0), 0.0)
+        else:
+            value = np.zeros_like(depth)
+    else:
+        raise ValueError(f"Unknown depth encoding: {encoding}")
+    return np.clip(value, 0.0, 1.0).astype(np.float32)
+
+
+def encode_infrared(image, encoding='raw'):
+    """红外编码（输入 uint8 灰度，输出 [0,1] float32）。"""
+    if encoding == 'raw':
+        value = image.astype(np.float32) / 255.0
+    elif encoding == 'clahe':
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        value = clahe.apply(image).astype(np.float32) / 255.0
+    elif encoding == 'percentile':
+        low, high = np.percentile(image, (1.0, 99.0))
+        value = (image.astype(np.float32) - low) / max(float(high - low), 1.0)
+    else:
+        raise ValueError(f"Unknown infrared encoding: {encoding}")
+    return np.clip(value, 0.0, 1.0).astype(np.float32)
 
 
 class MultimodalDataset(Dataset):
@@ -30,7 +92,10 @@ class MultimodalDataset(Dataset):
     
     def __init__(self, root_dir, split='train', img_size=(640, 640), 
                  num_classes=12, augment=True, modalities=None,
-                 augment_cfg=None, strict_modalities=True):
+                 augment_cfg=None, strict_modalities=True,
+                 depth_validity_mask=False, depth_encoding='linear',
+                 ir_encoding='raw', sample_ids=None,
+                 forbidden_hashes_path=None):
         """
         Args:
             root_dir: 数据集根目录
@@ -49,9 +114,19 @@ class MultimodalDataset(Dataset):
         self.modalities = modalities or ['rgb', 'infrared', 'depth']
         self.augment_cfg = augment_cfg or {}
         self.strict_modalities = strict_modalities
+        self.depth_validity_mask = depth_validity_mask
+        if depth_encoding not in DEPTH_ENCODINGS:
+            raise ValueError(f"Unknown depth encoding: {depth_encoding}")
+        if ir_encoding not in IR_ENCODINGS:
+            raise ValueError(f"Unknown infrared encoding: {ir_encoding}")
+        self.depth_encoding = depth_encoding
+        self.ir_encoding = ir_encoding
+        self.requested_sample_ids = sample_ids
+        self.forbidden_hashes_path = forbidden_hashes_path
         
         # 获取所有样本ID
         self.sample_ids = self._get_sample_ids()
+        self._enforce_hash_blacklist(self.sample_ids)
     
     def _get_sample_ids(self):
         """获取所有样本ID（不含扩展名）"""
@@ -84,7 +159,47 @@ class MultimodalDataset(Dataset):
                         f"{len(missing)} missing, {len(extra)} extra files. "
                         f"Examples missing={missing[:3]}, extra={extra[:3]}"
                     )
+
+        # 交叉验证等场景下按显式 ID 列表取子集
+        if self.requested_sample_ids is not None:
+            requested = sorted(set(self.requested_sample_ids))
+            available = set(sample_ids)
+            unknown = [sid for sid in requested if sid not in available]
+            if unknown:
+                raise RuntimeError(
+                    f"Requested sample ids not found in split: {unknown[:5]}"
+                )
+            sample_ids = requested
         return sample_ids
+
+    def _enforce_hash_blacklist(self, sample_ids):
+        """合规守卫：阻止测试集图像进入训练/验证数据加载器。
+
+        黑名单由 tools/build_test_blacklist.py 生成；文件不存在时守卫不生效。
+        """
+        if not self.forbidden_hashes_path:
+            return
+        if not os.path.exists(self.forbidden_hashes_path):
+            print(
+                "[compliance] test blacklist not found, guard inactive: "
+                f"{self.forbidden_hashes_path}"
+            )
+            return
+        with open(self.forbidden_hashes_path, encoding='utf-8') as file:
+            payload = json.load(file)
+        forbidden = set(payload.get('hashes', []))
+        if not forbidden:
+            return
+        for sample_id in sample_ids:
+            for modality in self.modalities:
+                path = os.path.join(self.root_dir, modality, f"{sample_id}.png")
+                if not os.path.exists(path):
+                    continue
+                if file_sha256(path) in forbidden:
+                    raise RuntimeError(
+                        "COMPLIANCE VIOLATION: test-set image detected in "
+                        f"training data: {path}"
+                    )
     
     def __len__(self):
         return len(self.sample_ids)
@@ -267,11 +382,18 @@ class MultimodalDataset(Dataset):
                     value.transpose(2, 0, 1)
                 ).float()
             elif modality == 'infrared':
-                value = image.astype(np.float32) / 255.0
+                value = encode_infrared(image, self.ir_encoding)
                 normalized[modality] = torch.from_numpy(value).unsqueeze(0).float()
             elif modality == 'depth':
-                value = np.clip(image.astype(np.float32) / 20000.0, 0, 1)
-                normalized[modality] = torch.from_numpy(value).unsqueeze(0).float()
+                depth = image.astype(np.float32)
+                value = encode_depth(depth, self.depth_encoding)
+                channels = [torch.from_numpy(value)]
+                if self.depth_validity_mask:
+                    # 官方约定深度 0 或过小为无效；掩码区分「无效」与「极近」
+                    channels.append(
+                        torch.from_numpy((depth > 0).astype(np.float32))
+                    )
+                normalized[modality] = torch.stack(channels, dim=0).float()
             else:
                 raise ValueError(f"Unknown modality: {modality}")
         
@@ -316,8 +438,27 @@ class MultimodalDataset(Dataset):
             ir = images['infrared'].astype(np.float32)
             ir = np.clip(255 * (ir / 255) ** gamma, 0, 255).astype(np.uint8)
             images['infrared'] = ir
+
+        # 模态 dropout：随机整幅置零红外或深度，模拟传感器失效/劣化
+        dropout_prob = self.augment_cfg.get('modality_dropout', 0.0)
+        if dropout_prob > 0 and random.random() < dropout_prob:
+            candidates = [m for m in ('infrared', 'depth') if m in images]
+            if candidates:
+                dropped = random.choice(candidates)
+                images[dropped] = np.zeros_like(images[dropped])
         
         return images, labels
+
+
+def seed_worker(worker_id):
+    """DataLoader worker 随机种子初始化。
+
+    默认情况下各 worker 继承相同的 Python random 状态，增强序列会在
+    worker 间重复；按 torch 官方配方为每个 worker 派生独立种子。
+    """
+    worker_seed = torch.initial_seed() % 2 ** 32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 
 def collate_fn(batch):
@@ -347,38 +488,57 @@ def collate_fn(batch):
     }
 
 
-def build_dataloader(cfg, split='train'):
-    """构建数据加载器"""
+def build_dataloader(cfg, split='train', sample_ids=None, eval_mode=False):
+    """构建数据加载器。
+
+    Args:
+        sample_ids: 显式样本 ID 子集（交叉验证折）
+        eval_mode: 强制评估行为（关增强、评估 batch、不 shuffle），
+            用于「从训练目录取验证折」的交叉验证场景
+    """
     data_cfg = cfg['data']
     train_cfg = cfg['train']
     
     split_dir = data_cfg.get(f'{split}_dir', split)
+    is_train = (split == 'train') and not eval_mode
     dataset = MultimodalDataset(
         root_dir=data_cfg['root'],
         split=split_dir,
         img_size=tuple(data_cfg['img_size']),
         num_classes=data_cfg['num_classes'],
-        augment=(split == 'train'),
+        augment=is_train,
         modalities=data_cfg['modalities'],
         augment_cfg=train_cfg.get('augment', {}),
         strict_modalities=data_cfg.get('strict_modalities', True),
+        depth_validity_mask=data_cfg.get('depth_validity_mask', False),
+        depth_encoding=data_cfg.get('depth_encoding', 'linear'),
+        ir_encoding=data_cfg.get('ir_encoding', 'raw'),
+        sample_ids=sample_ids,
+        forbidden_hashes_path=data_cfg.get('test_blacklist'),
     )
     
-    batch_size = train_cfg['batch_size'] if split == 'train' else cfg['test']['batch_size']
-    shuffle = (split == 'train')
+    batch_size = train_cfg['batch_size'] if is_train else cfg['test']['batch_size']
     num_workers = train_cfg['workers']
     
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=shuffle,
+        shuffle=is_train,
         num_workers=num_workers,
         collate_fn=collate_fn,
         pin_memory=True,
-        drop_last=(split == 'train')
+        drop_last=is_train,
+        worker_init_fn=seed_worker,
     )
     
     return dataloader
+
+
+def load_fold_assignments(path):
+    """读取 tools/make_folds.py 生成的折划分文件。"""
+    with open(path, encoding='utf-8') as file:
+        payload = json.load(file)
+    return {str(key): int(value) for key, value in payload['assignments'].items()}
 
 
 def load_config(config_path):

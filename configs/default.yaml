@@ -1,6 +1,6 @@
 # ============================================================
-# CityViMD-Net 配置文件
-# 面向城市场景的视觉多模态目标检测
+# CityViMD-Net 公开早期融合基线
+# 该配置用于复现仓库默认行为，不代表任何未公开实验或最终参赛配置
 # ============================================================
 
 # ---------- 数据集配置 ----------
@@ -11,6 +11,21 @@ data:
   val_dir: "val"
   test_dir: "test"
   strict_modalities: true
+
+  # 深度有效性掩码：官方约定深度 0 或过小为无效。开启后 depth 输出两通道
+  # [归一化深度, 有效掩码]，需同步将 model.in_channels.depth 设为 2
+  depth_validity_mask: false
+
+  # 深度编码：linear（官方线性截断）/ inverse（逆深度）/ log / minmax（逐图）
+  # 所有编码下无效深度（0）统一输出 0
+  depth_encoding: "linear"
+
+  # 红外编码：raw / clahe / percentile
+  ir_encoding: "raw"
+
+  # 测试集哈希黑名单（tools/build_test_blacklist.py 生成）。
+  # 文件存在时，训练/验证加载器会拒绝任何测试集图像（比赛合规守卫）
+  test_blacklist: "data/test_blacklist.json"
   
   # 模态设置
   modalities: ["rgb", "infrared", "depth"]
@@ -36,14 +51,13 @@ data:
 
 # ---------- 模型配置 ----------
 model:
-  name: "CityViMD-Net"
+  name: "CityViMD-Net-EarlyFusion-Baseline"
   
   # 骨干网络
   backbone:
     type: "cspdarknet"
     depth_multiple: 0.50
     width_multiple: 0.50
-    pretrained: false
     
   # Neck 特征金字塔
   neck:
@@ -98,6 +112,7 @@ train:
     fliplr: 0.5       # 左右翻转概率
     color_prob: 0.5   # RGB颜色增强概率
     ir_gamma_prob: 0.3
+    modality_dropout: 0.0  # 训练时随机置零红外或深度的概率（0 = 关闭）
 
   grad_clip: 10.0
     
