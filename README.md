@@ -1,9 +1,5 @@
 # CityViMD-Net
 
-[![CI](https://github.com/forever-ivy/CityViMD-Net/actions/workflows/ci.yml/badge.svg)](https://github.com/forever-ivy/CityViMD-Net/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
-
 面向 AIC2026 全球校园人工智能算法精英大赛「面向城市场景的视觉多模态目标检测」
 赛题的 RGB、红外与深度公开基线。
 
@@ -177,13 +173,5 @@ CityViMD-Net/
 - 公开基线假设三种模态已经完成像素级空间对齐；
 - 当前仅实现早期融合，无法单独处理缺失模态；
 - 仓库不包含比赛数据、训练权重或测试集预测；
-- 配置中的阈值是工程默认值，不应被视为对任意数据集的最优值。
-
-## 贡献
-
-提交 Issue 或 Pull Request 前请阅读 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
-请勿上传比赛数据、受限制权重、凭据或无法公开验证的成绩。
-
-## 许可证与引用
-
-代码按 [MIT License](LICENSE) 发布。引用信息见 [`CITATION.cff`](CITATION.cff)。
+- 配置中的阈值是工程默认值，不应被视为对任意数据集的最优值；
+- 请勿上传比赛数据、受限制权重、凭据或无法公开验证的成绩。
